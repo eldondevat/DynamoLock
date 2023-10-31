@@ -16,7 +16,7 @@ jobs:
       - name: Build
         run: go build -v ./...
       - name: Test with the Go CLI
-        run: go test
+        run: go test -v ./...
       - name: go report card
         run: |
           git clone https://github.com/gojp/goreportcard.git
