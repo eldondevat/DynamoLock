@@ -1,4 +1,4 @@
-module git.eldondev.com/dynamolock
+module git.eldondev.com/gotrc
 
 go 1.20
 
