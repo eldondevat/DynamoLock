@@ -35,7 +35,7 @@ type Locker struct {
 	recorder          chan lock
 }
 
-func NewLocker(client *dynamodb.Client, ctx context.Context, lockTable) *Locker {
+func NewLocker(client *dynamodb.Client, ctx context.Context, lockTable string) *Locker {
 	innerCtx, cancel := context.WithCancel(ctx)
 	id := uuid.New().String()
 	newLocker := Locker{time.NewTicker(1 * time.Minute),
@@ -44,6 +44,7 @@ func NewLocker(client *dynamodb.Client, ctx context.Context, lockTable) *Locker 
 		id,
 		innerCtx,
 		cancel,
+		lockTable,
 		nil,
 		make(chan string),
 		make(chan lock),
@@ -56,7 +57,7 @@ func (l *Locker) refresh(ctx context.Context) {
 	for _, lock := range l.locksHeld {
 		ok, err := l.AcquireLock(lock.name, lock.timeout)
 		if !ok || err != nil {
-			panic(ctx, fmt.Errorf("lock %s held by %s could not be refreshed : %w", lock.name, l.lockerId, err))
+			panic(fmt.Errorf("lock %s held by %s could not be refreshed : %w", lock.name, l.lockerId, err))
 		}
 	}
 }
@@ -102,7 +103,7 @@ func (l *Locker) releaseLock(ctx context.Context, name string) {
 		ExpressionAttributeValues: map[string]dynamodbtypes.AttributeValue{
 			":lockerId": &dynamodbtypes.AttributeValueMemberS{Value: l.lockerId},
 		},
-		TableName: aws.String(lockTable),
+		TableName: aws.String(l.lockTable),
 	})
 	var updatedLocksHeld []lock
 	if err != nil {
@@ -144,7 +145,7 @@ func (l *Locker) AcquireLock(name string, timeout time.Duration) (bool, error) {
 			":now":      &dynamodbtypes.AttributeValueMemberN{Value: fmt.Sprintf("%d", time.Now().Unix())},
 			":expiry":   &dynamodbtypes.AttributeValueMemberN{Value: fmt.Sprintf("%d", time.Now().Add(timeout).Unix())},
 		},
-		TableName: aws.String(lockTable),
+		TableName: aws.String(l.lockTable),
 	})
 	x, _ := json.Marshal(out)
 	slog.Debug("update result:", "result", string(x))
