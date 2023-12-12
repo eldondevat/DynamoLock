@@ -28,6 +28,6 @@ jobs:
           make install
           go install ./cmd/goreportcard-cli
           cd ..
-          goreportcard-cli
+          goreportcard-cli -v
 
 
