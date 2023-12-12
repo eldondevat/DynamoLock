@@ -29,14 +29,16 @@ type Locker struct {
 	lockerId          string
 	ctx               context.Context
 	cancel            context.CancelFunc
-	lockTable	  string
+	lockTable         string
 	locksHeld         []lock
 	releaser          chan string
 	recorder          chan lock
+	confirm           chan string
+	logger            *slog.Logger
 }
 
 func NewLocker(client *dynamodb.Client, ctx context.Context, lockTable string) *Locker {
-	innerCtx, cancel := context.WithCancel(ctx)
+	innerCtx, cancel := context.WithCancel(context.Background())
 	id := uuid.New().String()
 	newLocker := Locker{time.NewTicker(1 * time.Minute),
 		1 * time.Minute,
@@ -48,12 +50,14 @@ func NewLocker(client *dynamodb.Client, ctx context.Context, lockTable string) *
 		nil,
 		make(chan string),
 		make(chan lock),
+		make(chan string),
+		slog.With("locker", id),
 	}
 	go newLocker.heartBeater(ctx) // We use the original context here in case we are shutting down the inner context
 	return &newLocker
 }
 
-func (l *Locker) refresh(ctx context.Context) {
+func (l *Locker) refresh() {
 	for _, lock := range l.locksHeld {
 		ok, err := l.AcquireLock(lock.name, lock.timeout)
 		if !ok || err != nil {
@@ -64,28 +68,33 @@ func (l *Locker) refresh(ctx context.Context) {
 
 func (l *Locker) heartBeater(ctx context.Context) {
 	for {
+		l.logger.Debug("Heartbeater running")
 		select {
 		case <-l.ticker.C:
-			slog.Debug("Tick refresh")
-			l.refresh(ctx)
+			l.logger.Debug("Tick refresh")
+			l.refresh()
 		case toRelease := <-l.releaser:
-			slog.Debug("Lock release")
-			l.releaseLock(ctx, toRelease)
+			l.logger.Debug("Lock release")
+			l.releaseLock(toRelease)
 		case toRecord := <-l.recorder:
-			slog.Debug("Lock record", slog.String("lockname", toRecord.name))
+			l.logger.Debug("Lock record", slog.String("lockname", toRecord.name))
 			l.locksHeld = append(l.locksHeld, toRecord)
 			if toRecord.timeout < l.HeartbeatInterval {
 				l.HeartbeatInterval = toRecord.timeout / 2
 				l.ticker.Reset(l.HeartbeatInterval)
-				l.refresh(ctx)
+				l.refresh()
 			}
-		case <-l.ctx.Done():
+		case <-ctx.Done():
+			l.logger.Debug("Ctx done")
 			for _, lock := range l.locksHeld {
-				l.releaseLock(ctx, lock.name)
+				l.releaseLock(lock.name)
 			}
 			close(l.releaser)
 			close(l.recorder)
+			l.cancel()
 			return
+		case <-l.confirm:
+
 		}
 	}
 }
@@ -94,8 +103,8 @@ func (l *Locker) Close() {
 	l.cancel()
 }
 
-func (l *Locker) releaseLock(ctx context.Context, name string) {
-	_, err := l.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+func (l *Locker) releaseLock(name string) {
+	_, err := l.client.DeleteItem(l.ctx, &dynamodb.DeleteItemInput{
 		Key: map[string]dynamodbtypes.AttributeValue{
 			"name": &dynamodbtypes.AttributeValueMemberS{Value: name},
 		},
@@ -107,7 +116,12 @@ func (l *Locker) releaseLock(ctx context.Context, name string) {
 	})
 	var updatedLocksHeld []lock
 	if err != nil {
-		panic(fmt.Errorf("lock %s held by %s could not be released : %w", name, l.lockerId, err))
+		var oe *smithy.OperationError
+		if errors.As(err, &oe) && strings.Contains(oe.Error(), "ConditionalCheckFailedException") {
+			l.logger.Debug("Lock not found when deletion attempted")
+		} else {
+			panic(fmt.Errorf("lock %s held by %s could not be released : %w", name, l.lockerId, err))
+		}
 	}
 
 	if err == nil {
@@ -132,7 +146,7 @@ func (l *Locker) AcquireLock(name string, timeout time.Duration) (bool, error) {
 			break
 		}
 	}
-	slog.Debug("Attempting to acquire lock", "locker", l.lockerId, "name", name, "held", held)
+	l.logger.Debug("Attempting to acquire lock", "locker", l.lockerId, "name", name, "held", held)
 	out, err := l.client.UpdateItem(l.ctx, &dynamodb.UpdateItemInput{
 		Key: map[string]dynamodbtypes.AttributeValue{
 			"name": &dynamodbtypes.AttributeValueMemberS{Value: name},
@@ -148,10 +162,11 @@ func (l *Locker) AcquireLock(name string, timeout time.Duration) (bool, error) {
 		TableName: aws.String(l.lockTable),
 	})
 	x, _ := json.Marshal(out)
-	slog.Debug("update result:", "result", string(x))
+	l.logger.Debug("update result:", "result", string(x))
 	if err == nil {
 		if !held {
 			l.recorder <- lock{name, timeout}
+			l.confirm <- ""
 		}
 	} else {
 		var oe *smithy.OperationError

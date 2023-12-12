@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	smithy "github.com/aws/smithy-go"
 	"github.com/google/uuid"
 	"golang.org/x/exp/slog"
 
@@ -24,11 +25,14 @@ func init() {
 func TestLock(t *testing.T) {
 	testLock := uuid.New().String()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer func() {
+		log.Printf("Calling cancel")
+		cancel()
+	}()
 	awsConf, err := config.LoadDefaultConfig(ctx)
 	assert.Nil(t, err, "error should be nil")
 
-	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx)
+	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx, "locks")
 	ok, err := n.AcquireLock(testLock, time.Second*10)
 	assert.True(t, ok, "lock should be acquired")
 	assert.Nil(t, err, "error should be nil")
@@ -41,12 +45,12 @@ func TestFailToGetAcquiredLock(t *testing.T) {
 	awsConf, err := config.LoadDefaultConfig(ctx)
 	assert.Nil(t, err, "error should be nil")
 
-	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx)
+	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx, "locks")
 	ok, err := n.AcquireLock(testLock, time.Second*10)
 	assert.True(t, ok, "lock should be acquired")
 	assert.Nil(t, err, "error should be nil")
 
-	b := NewLocker(dynamodb.NewFromConfig(awsConf), ctx)
+	b := NewLocker(dynamodb.NewFromConfig(awsConf), ctx, "locks")
 	ok, err = b.AcquireLock(testLock, time.Second*10)
 	assert.Nil(t, err, "error should be nil")
 	assert.False(t, ok, "lock should not be acquired")
@@ -60,7 +64,7 @@ func TestGetExpiredAcquiredLock(t *testing.T) {
 	awsConf, err := config.LoadDefaultConfig(ctx)
 	assert.Nil(t, err, "error should be nil")
 
-	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx)
+	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx, "locks")
 	ok, err := n.AcquireLock(testLock, time.Second*1)
 	assert.True(t, ok, "lock should be acquired")
 	assert.Nil(t, err, "error should be nil")
@@ -69,7 +73,7 @@ func TestGetExpiredAcquiredLock(t *testing.T) {
 	n.ticker.Stop()
 
 	time.Sleep(2 * time.Second)
-	b := NewLocker(dynamodb.NewFromConfig(awsConf), ctx)
+	b := NewLocker(dynamodb.NewFromConfig(awsConf), ctx, "locks")
 	ok, err = b.AcquireLock(testLock, time.Second*10)
 	assert.Nil(t, err, "error should be nil")
 	assert.True(t, ok, "lock should be acquired")
@@ -83,13 +87,18 @@ func TestGetReleasedLock(t *testing.T) {
 	awsConf, err := config.LoadDefaultConfig(ctx)
 	assert.Nil(t, err, "error should be nil")
 
-	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx)
+	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx, "locks")
 	ok, err := n.AcquireLock(testLock, time.Second*10)
 	assert.True(t, ok, "lock should be acquired")
+	var unwrappedErr *smithy.OperationError
+	if unwrappedErr, ok = err.(*smithy.OperationError); ok {
+		assert.Nil(t, unwrappedErr.Err, "error should be nil")
+
+	}
 	assert.Nil(t, err, "error should be nil")
 	n.ReleaseLock(testLock)
 
-	b := NewLocker(dynamodb.NewFromConfig(awsConf), ctx)
+	b := NewLocker(dynamodb.NewFromConfig(awsConf), ctx, "locks")
 	ok, err = b.AcquireLock(testLock, time.Second*10)
 	assert.Nil(t, err, "error should be nil")
 	assert.True(t, ok, "lock should be acquired")
@@ -102,7 +111,7 @@ func TestReaquireHeldLock(t *testing.T) {
 	awsConf, err := config.LoadDefaultConfig(ctx)
 	assert.Nil(t, err, "error should be nil")
 
-	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx)
+	n := NewLocker(dynamodb.NewFromConfig(awsConf), ctx, "locks")
 	ok, err := n.AcquireLock(testLock, time.Second*10)
 	assert.True(t, ok, "lock should be acquired")
 	assert.Nil(t, err, "error should be nil")
